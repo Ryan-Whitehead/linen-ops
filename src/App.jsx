@@ -3,6 +3,7 @@ import { Box, Heading, Text, Button, Spinner } from "@chakra-ui/react";
 import { supabase } from "./supabaseClient";
 import AuthPortal from "./AuthPortal";
 import TicketForm from "./TicketForm";
+import TicketList from "./TicketList";
 
 function App() {
   const [session, setSession] = useState(null);
@@ -10,6 +11,7 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [profileLoading, setProfileLoading] = useState(false);
   const [profileError, setProfileError] = useState(null);
+  const [tickets, setTickets] = useState([]);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -25,6 +27,21 @@ function App() {
 
     return () => subscription.unsubscribe();
   }, []);
+
+  function fetchTickets(doctorId) {
+    supabase
+      .from("tickets")
+      .select("*")
+      .eq("doctor_id", doctorId)
+      .order("created_at", { ascending: false })
+      .then(({ data, error }) => {
+        if (error) {
+          console.error(error);
+          return;
+        }
+        setTickets(data);
+      });
+  }
 
   useEffect(() => {
     if (!session) {
@@ -46,10 +63,12 @@ function App() {
           setProfile(null);
         } else {
           setProfile(data);
+          if (data.role === "doctor") fetchTickets(data.id);
         }
         setProfileLoading(false);
       });
   }, [session]);
+
   if (loading) return <Spinner mt={20} />;
   if (!session) return <AuthPortal onAuthed={setSession} />;
   if (profileLoading) return <Spinner mt={20} />;
@@ -81,7 +100,13 @@ function App() {
       </Text>
 
       {profile.role === "doctor" ? (
-        <TicketForm profile={profile} />
+        <>
+          <TicketForm
+            profile={profile}
+            onSubmitted={() => fetchTickets(profile.id)}
+          />
+          <TicketList tickets={tickets} />
+        </>
       ) : (
         <Text mt={4} color="gray.500">
           Fulfillment queue comes in Lesson 5.
@@ -94,4 +119,5 @@ function App() {
     </Box>
   );
 }
+
 export default App;
