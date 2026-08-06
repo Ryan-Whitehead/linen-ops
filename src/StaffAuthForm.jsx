@@ -23,7 +23,7 @@ function StaffAuthForm({ onAuthed }) {
     setError(null);
     setLoading(true);
 
-    const [data, error] = await supabase.auth.signUp({
+    const { data, error } = await supabase.auth.signUp({
       email,
       password,
       options: {
@@ -61,9 +61,10 @@ function StaffAuthForm({ onAuthed }) {
 
     if (profileError || !profile) {
       setError("Could not load your profile.");
+      return;
     }
     if (profile.role === "doctor") {
-      await supabase.auth.SignOut();
+      await supabase.auth.signOut();
       setError(
         "This portal is for staff and managers. Use the Doctor sign-in instead.",
       );
