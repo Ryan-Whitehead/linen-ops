@@ -11,7 +11,7 @@ import {
 } from "@chakra-ui/react";
 import { supabase } from "./supabaseClient";
 
-function TicketForm({ profile }) {
+function TicketForm({ profile, onSubmitted }) {
   const [size, setSize] = useState(profile.default_size || "M");
   const [quantity, setQuantity] = useState(1);
   const [reason, setReason] = useState("routine_swap");
@@ -53,6 +53,7 @@ function TicketForm({ profile }) {
     }
 
     setSuccess(true);
+    onSubmitted?.();
     setTimeout(() => setSuccess(false), 3000);
 
     setSize(profile.default_size || "M");
