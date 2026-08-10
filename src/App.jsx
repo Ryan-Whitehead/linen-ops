@@ -4,6 +4,7 @@ import { supabase } from "./supabaseClient";
 import AuthPortal from "./AuthPortal";
 import TicketForm from "./TicketForm";
 import TicketList from "./TicketList";
+import TicketQueue from "./TicketQueue";
 
 function App() {
   const [session, setSession] = useState(null);
@@ -28,25 +29,29 @@ function App() {
     return () => subscription.unsubscribe();
   }, []);
 
-  function fetchTickets(doctorId) {
-    supabase
+  function fetchTickets(profile) {
+    let query = supabase
       .from("tickets")
-      .select("*")
-      .eq("doctor_id", doctorId)
-      .order("created_at", { ascending: false })
-      .then(({ data, error }) => {
-        if (error) {
-          console.error(error);
-          return;
-        }
-        setTickets(data);
-      });
+      .select("*, doctor:doctor_id(name)")
+      .order("created_at", { ascending: false });
+
+    if (profile.role === "doctor") {
+      query = query.eq("doctor_id", profile.id);
+    }
+
+    query.then(({ data, error }) => {
+      if (error) {
+        console.error(error);
+        return;
+      }
+      setTickets(data);
+    });
   }
 
   useEffect(() => {
     if (!session) {
-      setProfile(null);
-      setProfileError(null);
+      setProfile((prev) => (prev === null ? prev : null));
+      setProfileError((prev) => (prev === null ? prev : null));
       return;
     }
     setProfileLoading(true);
@@ -63,7 +68,7 @@ function App() {
           setProfile(null);
         } else {
           setProfile(data);
-          if (data.role === "doctor") fetchTickets(data.id);
+          fetchTickets(data);
         }
         setProfileLoading(false);
       });
@@ -103,14 +108,16 @@ function App() {
         <>
           <TicketForm
             profile={profile}
-            onSubmitted={() => fetchTickets(profile.id)}
+            onSubmitted={() => fetchTickets(profile)}
           />
           <TicketList tickets={tickets} />
         </>
       ) : (
-        <Text mt={4} color="gray.500">
-          Fulfillment queue comes in Lesson 5.
-        </Text>
+        <TicketQueue
+          profile={profile}
+          tickets={tickets}
+          onChanged={() => fetchTickets(profile)}
+        />
       )}
 
       <Button mt={4} onClick={() => supabase.auth.signOut()}>

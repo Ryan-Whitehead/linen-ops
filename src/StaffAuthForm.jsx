@@ -30,6 +30,7 @@ function StaffAuthForm({ onAuthed }) {
         data: { name, invite_code: inviteCode },
       },
     });
+
     setLoading(false);
     if (error) {
       setError(error.message);

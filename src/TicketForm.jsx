@@ -99,6 +99,7 @@ function TicketForm({ profile, onSubmitted }) {
             <option value="XL">XL</option>
             <option value="XXL">XXL</option>
           </NativeSelect.Field>
+          <NativeSelect.Indicator />
         </NativeSelect.Root>
 
         {/* Quantity */}
