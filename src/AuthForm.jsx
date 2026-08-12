@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import {
   Box,
   Button,
@@ -18,17 +18,55 @@ function AuthForm({ onAuthed }) {
   const [password, setPassword] = useState("");
   const [department, setDepartment] = useState("");
   const [defaultSize, setDefaultSize] = useState("M");
+  const [hospitals, setHospitals] = useState([]);
+  const [hospitalId, setHospitalId] = useState("");
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
 
+  // Fetch the list of hospitals once, for the signup dropdown.
+  // hospitals has an open SELECT policy, so this works with no auth session yet.
+  useEffect(() => {
+    async function fetchHospitals() {
+      const { data, error } = await supabase
+        .from("hospitals")
+        .select("id, name")
+        .order("name");
+
+      if (error) {
+        console.error("Failed to load hospitals:", error);
+        return;
+      }
+
+      setHospitals(data);
+      // Default the select to the first hospital once loaded, so the
+      // dropdown never submits an empty value if the user doesn't touch it.
+      if (data.length > 0) {
+        setHospitalId(data[0].id);
+      }
+    }
+
+    fetchHospitals();
+  }, []);
+
   async function handleSignUp() {
     setError(null);
+
+    if (!hospitalId) {
+      setError("Please select a hospital");
+      return;
+    }
+
     setLoading(true);
     const { data, error } = await supabase.auth.signUp({
       email,
       password,
       options: {
-        data: { name, department, default_size: defaultSize },
+        data: {
+          name,
+          department,
+          default_size: defaultSize,
+          hospital_id: hospitalId,
+        },
       },
     });
     setLoading(false);
@@ -93,6 +131,23 @@ function AuthForm({ onAuthed }) {
         />
         {mode === "signup" && (
           <>
+            <NativeSelect.Root>
+              <NativeSelect.Field
+                value={hospitalId}
+                onChange={(e) => setHospitalId(e.target.value)}
+              >
+                {hospitals.length === 0 && (
+                  <option value="">Loading hospitals…</option>
+                )}
+                {hospitals.map((h) => (
+                  <option key={h.id} value={h.id}>
+                    {h.name}
+                  </option>
+                ))}
+              </NativeSelect.Field>
+              <NativeSelect.Indicator />
+            </NativeSelect.Root>
+
             <Input
               placeholder="Department"
               value={department}
