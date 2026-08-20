@@ -77,13 +77,21 @@ export default {
         );
       }
 
-      const returnUrl = `${appUrl}/return/${ticket.return_token}`;
+      // Strip any trailing slash on APP_URL so we never produce a double slash
+      // (e.g. "https://app.vercel.app" + "/return/..." should not become "app//return/...")
+      const normalizedAppUrl = appUrl.replace(/\/+$/, "");
+      const returnUrl = `${normalizedAppUrl}/return/${ticket.return_token}`;
 
-      // Generate QR code as a base64 PNG data URI, embedded directly in the email.
+      // Generate QR code as a base64 PNG data URI, then strip the data-URI prefix
+      // so we can send the raw base64 as a real CID attachment instead.
+      // Gmail (and some other clients) silently block <img src="data:..."> inline
+      // images as a security measure — CID attachments are the reliable cross-client
+      // way to embed an image directly in the email body.
       const qrDataUrl = await QRCode.toDataURL(returnUrl, {
         width: 300,
         margin: 2,
       });
+      const qrBase64 = qrDataUrl.replace(/^data:image\/png;base64,/, "");
 
       const emailHtml = `
         <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">
@@ -91,7 +99,7 @@ export default {
           <p>Hi ${doctor.name},</p>
           <p>Your lab coat request (<strong>${ticket.display_id}</strong>) has been issued.</p>
           <p>When you're ready to return it, show this QR code to linen staff so they can scan it and close out your ticket:</p>
-          <img src="${qrDataUrl}" alt="Return QR code" width="300" height="300" />
+          <img src="cid:return-qr-code" alt="Return QR code" width="300" height="300" />
           <p style="color: #666; font-size: 13px;">
             If the QR code doesn't display, you can also share this link with staff:<br />
             <a href="${returnUrl}">${returnUrl}</a>
@@ -110,6 +118,13 @@ export default {
           to: [doctor.email],
           subject: `Your lab coat is ready — ${ticket.display_id}`,
           html: emailHtml,
+          attachments: [
+            {
+              filename: "return-qr-code.png",
+              content: qrBase64,
+              content_id: "return-qr-code",
+            },
+          ],
         }),
       });
 
