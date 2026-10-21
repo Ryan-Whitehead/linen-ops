@@ -1,0 +1,301 @@
+LINEN-OPS CODEBASE AUDIT
+Generated: 2026-10-21
+Scope: src/, supabase/, config files. No source files were modified.
+Checks run: `npm run lint` (5 errors), `vite build` (succeeds, >500 kB chunk warning).
+Related: report.txt (earlier, redundancy-only review dated 2026-09-10). Its
+findings still hold and are folded in below.
+
+=====================================================================
+SUMMARY
+=====================================================================
+The doctor flow (sign up, submit ticket, view tickets/history) and the staff
+flow (claim, advance, release) are built. The return-by-QR flow is built on the
+frontend and in the edge function. The app builds, but it is NOT yet
+functional end to end. The main gaps:
+
+  * Nothing in the repo creates the database. No SQL migrations exist, yet the
+    app depends on tables, RLS policies, triggers and a pg_net call that live
+    only in the hosted Supabase project.
+  * The "issued" -> email-QR step depends on a DB trigger that cannot be
+    verified from this repo.
+  * Returns.jsx, AuditLog.jsx and History.jsx (staff side) are not reachable.
+  * Cancel is never possible, so the "cancelled" status is dead.
+  * Lint fails (5 errors).
+  * Sender email is Resend's sandbox address, which only delivers to the
+    Resend account owner.
+
+Sections:
+  A. Blockers / needed to be functional
+  B. Redundancies (refactor suggestions)
+  C. Dead code and files to delete
+  D. Lint, build and code-quality issues
+  E. Security and config hygiene
+  F. Suggested order of work
+
+=====================================================================
+A. BLOCKERS / WHAT STILL NEEDS TO BE DONE FOR IT TO BE FUNCTIONAL
+=====================================================================
+
+A1. Database schema is not in version control (HIGH)
+    The code reads or writes these, and none are defined in the repo:
+      tables:  hospitals, users, tickets, ticket_events
+      tickets columns used: id, display_id, hospital_id, doctor_id,
+        department, size, quantity, reason, fulfillment_type,
+        delivery_location, needed_by, urgency, notes, status,
+        assigned_staff_id, return_token, return_code_emailed_at,
+        returned_at, returned_by_staff_id, created_at
+      ticket_events columns used: id, ticket_id, actor_id, event_type
+        (created | status_changed | assigned | edited | return_scanned),
+        from_status, to_status, created_at
+      users columns used: id, name, email, role (doctor | staff | manager),
+        department, default_size, hospital_id
+    Also implied but absent from the repo:
+      - a trigger on auth.users that creates the public.users row from signup
+        metadata (name, department, default_size, hospital_id, invite_code)
+      - invite-code validation and role assignment for staff signups
+      - a display_id generator and a return_token default on tickets
+      - RLS policies (hospital scoping, doctors see only their own tickets,
+        staff can update claimed tickets, open SELECT on hospitals)
+      - a trigger that fires on status -> 'issued' and calls the edge function
+        via pg_net
+      - a trigger that writes ticket_events rows
+    Action: run `npx supabase db pull` (project is linked: ref
+    ayvobqhxrpcdesyijytj) to dump the live schema into supabase/migrations/,
+    commit it, and review it. Without this, the project cannot be rebuilt, and
+    every claim below about the DB is unverified.
+
+A2. Issued -> QR email trigger is unverified (HIGH)
+    The edge function send-return-email only runs when something calls it.
+    index.ts says the Postgres trigger calls it via pg_net, but that trigger is
+    not in the repo. Needed:
+      - confirm the trigger exists, and that it passes the service/secret key
+        (the function only accepts auth mode "secret")
+      - confirm the function is deployed (`npx supabase functions deploy
+        send-return-email`)
+      - confirm secrets are set: APP_URL, RESEND_API_KEY
+        (`npx supabase secrets list`)
+
+A3. Email sender is Resend's sandbox address (HIGH for real use)
+    index.ts sends from "Linen Ops <onboarding@resend.dev>". Resend only
+    delivers that to the account owner's own address, so real doctors will not
+    receive their QR code. Needed: verify a domain in Resend and change the
+    `from` address.
+
+A4. HTML injection in the email body (MEDIUM)
+    doctor.name and ticket.display_id are interpolated into HTML unescaped. A
+    user can set their own name at signup (it comes from signUp metadata). Add
+    an HTML-escape helper for interpolated values.
+
+A5. Staff-side screens exist but are not reachable (MEDIUM)
+    Returns.jsx and AuditLog.jsx are never imported (Home.jsx renders only
+    TicketQueue for staff). Needed: add Tabs to the staff branch of Home.jsx
+    (Queue | Returns | Audit Log). Audit log is arguably manager-only: gate it
+    on profile.role === 'manager' and confirm the RLS policy on ticket_events
+    matches.
+    History.jsx is wired only for doctors. Staff cannot see ready/issued
+    tickets in any filtered view either: TicketQueue lists every status
+    together (including returned and cancelled, which should not appear under
+    "Open Requests"). Filter TicketQueue to active statuses, as Home does for
+    doctors.
+
+A6. No way to cancel a ticket (MEDIUM)
+    'cancelled' is handled in colors and History filters but nothing ever sets
+    it. Needed: a Cancel button for doctors on their own 'new' tickets, and
+    probably for staff. Needs a matching RLS update policy. Otherwise remove
+    'cancelled' from the UI.
+
+A7. Staff status flow has gaps (MEDIUM)
+    TicketQueue handles new -> in_progress (claim) -> ready -> issued. The
+    update calls do not guard on the current status (unlike ReturnConfirmation,
+    which does .eq("status","issued")). Two staff can claim the same ticket at
+    the same time; the second overwrites the first. Add
+    .eq("assigned_staff_id", null) / .is("assigned_staff_id", null) to claim
+    and .eq("status", ticket.status) to advance, and check that an update
+    matched a row (use .select()).
+    handleRelease from 'ready' resets status to 'new': check that is intended.
+
+A8. Doctor never sees whether the QR email was sent (LOW)
+    TicketList shows status only. Consider showing "QR emailed" /
+    return_code_emailed_at, and a "resend" path if the email fails (the
+    function returns 502 on Resend failure and nothing retries it).
+
+A9. Signup flow edge cases (MEDIUM)
+    - If Supabase email confirmation is on, signUp returns session = null and
+      AuthForm/StaffAuthForm call onAuthed(null): the user sees nothing and no
+      message. Show a "check your email" message when data.session is null.
+      Check the project's setting (Auth > Providers > Email).
+    - Staff signup trusts `invite_code` sent from the client; validation must be
+      server-side (A1 trigger). Verify it rejects bad codes and that a client
+      cannot self-assign role: 'manager' via signUp metadata.
+    - AuthForm: a failed hospitals fetch only logs to console; the dropdown
+      then shows "Loading hospitals…" forever. Surface an error.
+    - AuthForm defaults the select to hospitals[0] (see commit 577e16c, which
+      was meant to prevent "defaulting to first hospital"). The code still
+      pre-selects data[0].id. Add a "Select your hospital" empty option instead
+      if the goal is to force a choice.
+    - Email/password inputs have no type="email", no autoComplete attributes,
+      and Enter does not submit (no <form>). Password reset / forgot-password
+      is not implemented at all.
+
+A10. Return confirmation page (LOW)
+    Works as designed, but: no "return_scanned" event is written from the
+    client (check that the DB trigger does it, see A1); a staff member from a
+    different hospital relies entirely on RLS to be blocked (verify); and
+    ticket lookup errors show the same message for "invalid code" and "network
+    error".
+
+A11. Deployment (LOW)
+    - APP_URL secret must match the deployed Vercel URL, or QR links break.
+    - VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY must be set in the Vercel
+      project's environment variables (.env.local is git-ignored).
+    - vercel.json rewrite is in place (good).
+
+=====================================================================
+B. REDUNDANCIES (carried over from report.txt, verified against current code)
+=====================================================================
+
+B1. statusColor() is copy-pasted (TicketList.jsx, TicketQueue.jsx, plus a
+    partial copy in History.jsx). Move to src/lib/ticketStatus.js with a
+    STATUS_COLOR map. Also unifies Returns.jsx's hardcoded "green" and the
+    ACTIVE_STATUSES / HISTORY_STATUSES constants in Home.jsx.
+
+B2. Auth forms duplicate each other (AuthForm.jsx vs StaffAuthForm.jsx): same
+    state, error Alert, email/password inputs, mode toggle, signIn/signUp
+    handlers. Merge into one component with a `variant` prop or a shared
+    useAuthForm hook. Keep the staff-only doctor-role rejection.
+    Also AuthPortal.jsx is a thin wrapper and can stay.
+
+B3. Session + profile loading is duplicated (Home.jsx and ReturnConfirmation.jsx):
+    same getSession / onAuthStateChange effect, same users-row fetch, same
+    "Couldn't load your profile" screen. Extract useSession()/useProfile() hook,
+    plus a <ProfileError /> component. This also fixes lint errors (D1).
+
+B4. Ticket card markup repeated in TicketList, TicketQueue, History, Returns
+    (and similar in AuditLog). Extract <TicketCard>. Empty-state Text repeated
+    in five files: extract <EmptyState message="..." />.
+
+B5. Fetch boilerplate in AuditLog.jsx and Returns.jsx (loading/error/data +
+    identical comment). A small useSupabaseQuery hook covers both and fixes D1.
+
+B6. Small repeats: `new Date(x).toLocaleString()` (6 files) -> formatDateTime();
+    `ticket.reason.replace("_"," ")` (TicketList, TicketQueue) -> use a
+    REASON_LABEL map (it only replaces the first underscore, and TicketForm
+    already has proper labels for the reasons: reuse that list); the size list
+    ["XS".."XXL"] is hard-coded in both AuthForm and TicketForm -> SIZES const;
+    update/onChanged boilerplate in TicketQueue's handleClaim/handleRelease/
+    handleAdvance -> one updateTicket(ticket, patch) helper.
+
+B7. Repeated container Box props (maxW/mx/mt/p/borderWidth/borderRadius) in 6
+    files -> <Panel>.
+
+B8. TicketForm: eight useState calls plus a manual reset block that repeats the
+    defaults. Use one `initialForm` object and a single state object.
+    Also the datetime-local value `neededBy` is sent as a local-time string
+    with no timezone; convert with new Date(neededBy).toISOString().
+
+=====================================================================
+C. DEAD CODE AND FILES TO DELETE / FIX
+=====================================================================
+
+C1. src/App.css and src/index.css (about 295 lines): neither is imported by
+    main.jsx or any component. Leftover Vite scaffolding. Delete. Also
+    src/assets/hero.png, react.svg, vite.svg and public/icons.svg are unused
+    (confirm with a grep before deleting); public/favicon.svg is referenced by
+    index.html (keep).
+C2. Returns.jsx, AuditLog.jsx: unused until wired up (A5).
+C3. `framer-motion` and `@emotion/styled` in package.json: Chakra v3 needs
+    @emotion/react only; check whether either is imported anywhere. Neither is
+    imported in src/. Remove if unused (`npm uninstall framer-motion
+    @emotion/styled`) and rebuild to confirm.
+C4. README.md is the unmodified Vite template. Replace with setup steps: env
+    vars, Supabase link/deploy, Resend secrets, Vercel deploy.
+C5. `import React from "react"` in main.jsx is only needed for React.StrictMode
+    (fine). index.html <title> is still "linen-ops": set it to "Linen Ops".
+C6. supabase/.temp/cli-latest is untracked CLI cache; add `supabase/.temp/` to
+    .gitignore and `git rm --cached supabase/.temp/linked-project.json`.
+C7. Untracked source files not yet committed: src/AuditLog.jsx,
+    src/History.jsx, src/Returns.jsx, report.txt, modified src/Home.jsx.
+    Commit or discard deliberately.
+C8. supabase/functions/send-return-email/index.ts ends with a leftover
+    "To invoke locally" template comment block; keep or trim.
+
+=====================================================================
+D. LINT, BUILD AND CODE-QUALITY ISSUES
+=====================================================================
+
+D1. `npm run lint` fails with 5 react-hooks/set-state-in-effect errors:
+      AuditLog.jsx:41, Home.jsx:57, ReturnConfirmation.jsx:53 and :79,
+      Returns.jsx:11
+    All are synchronous setState at the top of an effect (setLoading(true),
+    setProfile(null), ...). The hooks proposed in B3 and B5 resolve these by
+    deriving loading state instead of setting it in the effect.
+D2. Home.jsx fetchTickets(profile) is defined outside the effect and called
+    from inside a .then; it has no loading or error state (errors only go to
+    console.error), so a failed ticket fetch shows an empty list as if there
+    were no tickets. Add error state and display it.
+D3. Home.jsx: tickets are only fetched once per login and after local actions.
+    No realtime updates, so a doctor won't see a ticket move to 'issued' (or a
+    staff member see a new ticket) without a manual reload. Use Supabase
+    realtime subscriptions on `tickets`, or at least polling. This matters for
+    the staff queue.
+D4. All Supabase mutations in TicketQueue only console.error on failure; the
+    user sees nothing. Add a toast or inline error.
+D5. Build emits a >500 kB chunk warning (Chakra UI). Non-blocking; optionally
+    lazy-load ReturnConfirmation / staff views.
+D6. No tests exist. At minimum add tests for the status-transition logic and
+    for ReturnConfirmation's guarded update.
+D7. No error boundary around the app; a render error gives a blank page.
+D8. Accessibility: the sign-in/sign-up toggle is a clickable <Text> (use a
+    <Button variant="plain"> or Link); inputs have placeholders but no labels.
+D9. eslint config does not cover supabase/functions (Deno). Fine, but note it.
+
+=====================================================================
+E. SECURITY AND CONFIG HYGIENE
+=====================================================================
+
+E1. .claude/settings.local.json contains a hard-coded Supabase publishable
+    key in an allowed curl command and a local diag.mjs path. The publishable
+    key is meant to be public, and the file is git-ignored (via your global
+    git ignore), so no action is needed other than never putting a
+    secret/service key there.
+E2. supabase/.temp/linked-project.json is tracked and exposes the project ref
+    and org id. Not a secret, but it is CLI cache: untrack it (C6).
+E3. .env.local is ignored (good). Never put the service-role/secret key in any
+    VITE_ variable: everything VITE_* ships to the browser.
+E4. All authorization is enforced by RLS only (the client filters are
+    convenience). Because the policies are not in the repo (A1), run a review
+    of them: doctors can only read/insert their own tickets, only staff in the
+    same hospital can update tickets, role cannot be changed by the user, and
+    ticket_events is not writable from the client.
+E5. return_token is the only secret behind the QR link. Check it is a long
+    random value (e.g. gen_random_uuid() or 32+ random bytes) and, ideally, is
+    rotated or invalidated after the ticket is returned. The page already
+    requires a logged-in staff account, which is good.
+
+=====================================================================
+F. SUGGESTED ORDER OF WORK
+=====================================================================
+ 1. `npx supabase db pull` and commit migrations (A1); review RLS (E4) and
+    confirm the issued -> email trigger (A2).
+ 2. Verify edge function deployment + secrets; set a verified Resend sender
+    (A2, A3); escape HTML in email (A4).
+ 3. Fix claim/advance race conditions and show action errors (A7, D4).
+ 4. Wire Returns / AuditLog / History into the staff view, filter the queue
+    (A5).
+ 5. Decide on cancel (A6): build it or drop 'cancelled'.
+ 6. Handle email-confirmation signups and error states in the auth forms (A9).
+ 7. Extract shared pieces: ticketStatus lib, useSession/useProfile,
+    unified auth form, TicketCard/EmptyState (B1-B5); this clears the lint
+    errors (D1).
+ 8. Add realtime updates (D3).
+ 9. Delete dead files and unused deps; gitignore supabase/.temp; rewrite
+    README (C1-C6).
+10. Set Vercel env vars and APP_URL, then run an end-to-end test: doctor signs
+    up, requests coat, staff claims -> ready -> issued, doctor receives QR
+    email, staff scans QR and confirms return, audit log shows the events.
+
+NOTES ON CONFIDENCE
+  * Findings in A1/A2/E4/E5 are based on what the code assumes. The hosted
+    database was not inspected, so those items may already be handled there.
+  * Unused-file and unused-dependency claims (C1, C3) come from searching src/
+    and package.json; re-confirm before deleting.

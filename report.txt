@@ -1,0 +1,177 @@
+REFACTORING REPORT — src/ redundancy review
+Generated: 2026-09-10
+Scope: all files in src/ (no files were modified as part of this review)
+
+=====================================================================
+1. DUPLICATED `statusColor()` FUNCTION
+=====================================================================
+Files: TicketList.jsx, TicketQueue.jsx (identical, full 6-case version)
+       History.jsx (partial 2-case version: returned/cancelled)
+       Returns.jsx (no function — hardcodes colorPalette="green" since
+       it only ever shows returned tickets)
+
+TicketList.jsx and TicketQueue.jsx contain the exact same function:
+
+    function statusColor(status) {
+      switch (status) {
+        case "new": return "blue";
+        case "in_progress": return "yellow";
+        case "ready": return "purple";
+        case "issued": return "teal";
+        case "returned": return "green";
+        case "cancelled": return "red";
+        default: return "gray";
+      }
+    }
+
+History.jsx re-implements a subset of the same mapping. This is a
+single source of truth waiting to happen — e.g. a shared
+`src/lib/ticketStatus.js` (or `constants.js`) exporting a
+STATUS_COLOR map (and reused for the STATUS label text too). Would
+remove ~20 duplicated lines and prevent the maps from drifting out
+of sync as statuses are added/changed.
+
+=====================================================================
+2. DUPLICATED "TICKET CARD" MARKUP
+=====================================================================
+Files: TicketList.jsx, TicketQueue.jsx (renderTicketRow), History.jsx,
+       Returns.jsx, AuditLog.jsx (similar shape, different fields)
+
+The same structural pattern repeats in every list view:
+
+    <Box p={3} borderWidth="1px" borderRadius="md">
+      <Box display="flex" justifyContent="space-between" alignItems="center">
+        <Text fontWeight="bold">{ticket.display_id}</Text>
+        <Badge colorPalette={...}>{...}</Badge>
+      </Box>
+      <Text fontSize="sm" color="gray.600" mt={1}>...</Text>
+      <Text fontSize="xs" color="gray.400" mt={1}>...</Text>
+    </Box>
+
+TicketList, TicketQueue, History, and Returns all build this same
+card by hand with slightly different fields. A shared `<TicketCard>`
+component (accepting the ticket, a color, a subtitle line, and a
+timestamp line as props/children) would collapse four near-identical
+blocks into one, and any future tweak (spacing, borders, hover state)
+would only need to happen in one place.
+
+The "empty state" text is also copy-pasted in five files with the
+same styling (`<Text color="gray.500" fontSize="sm">...no items
+yet...</Text>` in TicketList, TicketQueue, History, Returns, AuditLog)
+— a small `<EmptyState message="..." />` helper would cover all of
+them.
+
+=====================================================================
+3. AuthForm.jsx AND StaffAuthForm.jsx ARE NEARLY IDENTICAL
+=====================================================================
+Both components:
+  - Manage the same state shape: mode, name, email, password, error,
+    loading (AuthForm additionally tracks department/defaultSize/
+    hospitals/hospitalId for its extra signup fields).
+  - Render the same outer Box (maxW="360px" mx="auto" mt={16} p={8}
+    borderWidth="1px" borderRadius="lg"), the same Alert.Root error
+    block, the same email/password Input pair, and the same
+    sign-in/sign-up toggle Button + toggle Text at the bottom.
+  - Have a near-identical `handleSignIn` (StaffAuthForm's is a
+    superset — it additionally checks profile.role !== "doctor" and
+    signs the user back out if so).
+  - Have a near-identical `handleSignUp` (both call
+    supabase.auth.signUp with an options.data payload, differing
+    only in which extra fields get passed).
+
+The only real differences are the heading text, the button labels,
+and the extra signup-only fields (hospital/department/size vs.
+invite code). This is a strong candidate for a single
+`AuthForm({ variant: "doctor" | "staff", ... })` component, or a
+shared `useAuthForm()` hook that owns the common state/handlers while
+each portal renders its own extra fields. Would cut ~100 duplicated
+lines and remove the risk of the two forms' auth logic silently
+diverging (e.g. only StaffAuthForm currently rejects doctors — if
+that rule ever needs to apply elsewhere it's easy to forget to update
+both files).
+
+=====================================================================
+4. DUPLICATED SESSION/PROFILE-LOADING LOGIC
+=====================================================================
+Files: Home.jsx, ReturnConfirmation.jsx
+
+Both components independently implement:
+  - A useEffect that calls supabase.auth.getSession(), stores it,
+    and subscribes to supabase.auth.onAuthStateChange (with the same
+    cleanup via subscription.unsubscribe()).
+  - A second useEffect that, given a session, fetches the row from
+    "users" matching session.user.id and stores it as `profile`,
+    with matching profileLoading/profileError state and identical
+    error handling.
+  - A "Couldn't load your profile" error screen with a "Log out"
+    button that calls supabase.auth.signOut().
+
+This is essentially the same "current user" hook duplicated across
+two files. Extracting it into a `useSession()` / `useProfile()` hook
+(returning { session, profile, loading, error }) would remove ~40
+lines of duplicated effect/state wiring and guarantee both entry
+points treat auth/profile loading identically.
+
+=====================================================================
+5. DUPLICATED "AuditLog.jsx" / "Returns.jsx" DATA-FETCH SHAPE
+=====================================================================
+Both components fetch a list from Supabase with the exact same
+loading/error/data state pattern, the exact same useEffect comment
+("profile isn't used directly in the query... re-fetching when
+profile changes keeps this correct..."), and the same Spinner /
+error Text / empty Text / list Box structure as AuditLog vs. Returns
+vs. History. A small `useSupabaseQuery(queryBuilder, deps)` hook
+would remove this boilerplate (setLoading(true) → run → setError/
+setData → setLoading(false)) from all three list views at once.
+
+=====================================================================
+6. NOTE: AuditLog.jsx AND Returns.jsx ARE NOT CURRENTLY WIRED UP
+=====================================================================
+Neither <AuditLog /> nor <Returns /> is imported/rendered anywhere
+(Home.jsx only renders TicketForm/TicketList/TicketQueue/History).
+Not a redundancy per se, but worth flagging — if these are meant to
+be reachable in the staff/manager view (e.g. as extra Tabs next to
+TicketQueue, similar to how doctors get "My Tickets"/"History"),
+that wiring still needs to be added; if they're superseded/replaced
+by something else, they're currently dead code.
+
+=====================================================================
+7. UNUSED BOILERPLATE CSS
+=====================================================================
+Files: App.css, index.css
+
+Neither file is imported anywhere in src/ (grep for "App.css" /
+"index.css" across src turns up nothing). These look like leftover
+Vite/CRA scaffolding from before the app switched to Chakra UI for
+styling. If confirmed unused, they're ~295 lines that can be deleted
+outright rather than "refactored."
+
+=====================================================================
+8. MINOR / LOW-PRIORITY
+=====================================================================
+- `new Date(x).toLocaleString()` is repeated verbatim in AuditLog,
+  History, Returns, TicketList, TicketQueue, ReturnConfirmation — a
+  tiny `formatDateTime()` helper would be a small but easy win.
+- `ticket.reason.replace("_", " ")` is duplicated in TicketList.jsx
+  and TicketQueue.jsx.
+- The outer "card container" Box props (maxW/mx/mt/p/borderWidth/
+  borderRadius) are repeated with slightly different values across
+  AuthForm, StaffAuthForm, TicketForm, TicketList, TicketQueue,
+  ReturnConfirmation — could become a shared `<Panel>` wrapper if the
+  team wants a consistent container component.
+
+=====================================================================
+SUGGESTED PRIORITY ORDER
+=====================================================================
+1. Extract shared status-color map (#1) — quick, low-risk, prevents
+   drift.
+2. Extract useSession/useProfile hook (#4) — removes real duplicated
+   logic (not just markup) between Home and ReturnConfirmation.
+3. Unify AuthForm/StaffAuthForm (#3) — biggest line-count win, but
+   needs care since the two forms have real behavioral differences
+   (staff role check, different signup fields).
+4. Shared TicketCard/EmptyState components (#2) — mostly cosmetic
+   dedup, moderate payoff.
+5. useSupabaseQuery hook (#5) — nice-to-have once more list views
+   like AuditLog/Returns are actually in use.
+6. Delete unused App.css/index.css if confirmed dead (#7).
