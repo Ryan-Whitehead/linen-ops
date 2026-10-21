@@ -1,10 +1,14 @@
 import { useEffect, useState } from "react";
-import { Box, Heading, Text, Button, Spinner } from "@chakra-ui/react";
+import { Box, Heading, Text, Button, Spinner, Tabs } from "@chakra-ui/react";
 import { supabase } from "./supabaseClient";
 import AuthPortal from "./AuthPortal";
 import TicketForm from "./TicketForm";
 import TicketList from "./TicketList";
 import TicketQueue from "./TicketQueue";
+import History from "./History";
+
+const ACTIVE_STATUSES = ["new", "in_progress", "ready", "issued"];
+const HISTORY_STATUSES = ["returned", "cancelled"];
 
 function Home() {
   const [session, setSession] = useState(null);
@@ -96,6 +100,13 @@ function Home() {
 
   if (!profile) return <Spinner mt={20} />;
 
+  const activeTickets = tickets.filter((t) =>
+    ACTIVE_STATUSES.includes(t.status),
+  );
+  const historyTickets = tickets.filter((t) =>
+    HISTORY_STATUSES.includes(t.status),
+  );
+
   return (
     <Box p={8}>
       <Heading size="lg">Welcome, {profile.name}</Heading>
@@ -105,13 +116,25 @@ function Home() {
       </Text>
 
       {profile.role === "doctor" ? (
-        <>
+        <Box mt={6}>
           <TicketForm
             profile={profile}
             onSubmitted={() => fetchTickets(profile)}
           />
-          <TicketList tickets={tickets} />
-        </>
+
+          <Tabs.Root defaultValue="my-tickets" mt={6}>
+            <Tabs.List>
+              <Tabs.Trigger value="my-tickets">My Tickets</Tabs.Trigger>
+              <Tabs.Trigger value="history">History</Tabs.Trigger>
+            </Tabs.List>
+            <Tabs.Content value="my-tickets">
+              <TicketList tickets={activeTickets} />
+            </Tabs.Content>
+            <Tabs.Content value="history">
+              <History tickets={historyTickets} />
+            </Tabs.Content>
+          </Tabs.Root>
+        </Box>
       ) : (
         <TicketQueue
           profile={profile}

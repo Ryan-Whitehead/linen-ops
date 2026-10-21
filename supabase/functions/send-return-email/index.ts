@@ -1,13 +1,21 @@
-// Follow this setup guide to integrate the Deno language server with your editor:
-// https://deno.land/manual/getting_started/setup_your_environment
-// This enables autocomplete, go to definition, etc.
-
 // Setup type definitions for built-in Supabase Runtime APIs
 import "@supabase/functions-js/edge-runtime.d.ts";
 import { withSupabase } from "@supabase/server";
 import QRCode from "npm:qrcode@1.5.3";
+import nodemailer from "npm:nodemailer@6.9.4";
 
 console.log("send-return-email function booted");
+
+// Escape user-controlled values before interpolating them into HTML.
+// doctor.name comes from signUp metadata, so it must never be trusted as markup.
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
 
 // This endpoint is server-to-server only (called by the Postgres trigger via pg_net),
 // so we only accept the "secret" auth mode — never "publishable" / client-facing.
@@ -39,7 +47,6 @@ export default {
       }
 
       // Guard: only send for tickets actually in 'issued' status.
-      // Protects against the function being called out of order or twice.
       if (ticket.status !== "issued") {
         return Response.json(
           { error: `Ticket status is '${ticket.status}', expected 'issued'` },
@@ -67,70 +74,86 @@ export default {
       }
 
       const appUrl = Deno.env.get("APP_URL");
-      const resendApiKey = Deno.env.get("RESEND_API_KEY");
+      const gmailUser = Deno.env.get("GMAIL_USER");
+      const gmailPasswordRaw = Deno.env.get("GMAIL_APP_PASSWORD");
 
-      if (!appUrl || !resendApiKey) {
-        console.error("Missing APP_URL or RESEND_API_KEY secret");
+      if (!appUrl || !gmailUser || !gmailPasswordRaw) {
+        console.error(
+          "Missing APP_URL, GMAIL_USER or GMAIL_APP_PASSWORD secret",
+        );
         return Response.json(
           { error: "Server misconfiguration" },
           { status: 500 },
         );
       }
 
-      // Strip any trailing slash on APP_URL so we never produce a double slash
-      // (e.g. "https://app.vercel.app" + "/return/..." should not become "app//return/...")
+      // Google displays app passwords in groups of four with spaces; strip them
+      // in case they were pasted in that way.
+      const gmailPassword = gmailPasswordRaw.replace(/\s+/g, "");
+
+      // Strip any trailing slash on APP_URL so we never produce a double slash.
       const normalizedAppUrl = appUrl.replace(/\/+$/, "");
       const returnUrl = `${normalizedAppUrl}/return/${ticket.return_token}`;
 
-      // Generate QR code as a base64 PNG data URI, then strip the data-URI prefix
-      // so we can send the raw base64 as a real CID attachment instead.
-      // Gmail (and some other clients) silently block <img src="data:..."> inline
-      // images as a security measure — CID attachments are the reliable cross-client
-      // way to embed an image directly in the email body.
+      // Generate the QR code as a base64 PNG, then send it as a CID attachment.
+      // Gmail blocks <img src="data:..."> inline images, but CID attachments render
+      // reliably across clients.
       const qrDataUrl = await QRCode.toDataURL(returnUrl, {
         width: 300,
         margin: 2,
       });
       const qrBase64 = qrDataUrl.replace(/^data:image\/png;base64,/, "");
 
+      const safeName = escapeHtml(doctor.name ?? "");
+      const safeDisplayId = escapeHtml(ticket.display_id ?? "");
+      const safeReturnUrl = escapeHtml(returnUrl);
+
       const emailHtml = `
         <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">
           <h2>Your lab coat is ready</h2>
-          <p>Hi ${doctor.name},</p>
-          <p>Your lab coat request (<strong>${ticket.display_id}</strong>) has been issued.</p>
+          <p>Hi ${safeName},</p>
+          <p>Your lab coat request (<strong>${safeDisplayId}</strong>) has been issued.</p>
           <p>When you're ready to return it, show this QR code to linen staff so they can scan it and close out your ticket:</p>
           <img src="cid:return-qr-code" alt="Return QR code" width="300" height="300" />
           <p style="color: #666; font-size: 13px;">
             If the QR code doesn't display, you can also share this link with staff:<br />
-            <a href="${returnUrl}">${returnUrl}</a>
+            <a href="${safeReturnUrl}">${safeReturnUrl}</a>
           </p>
         </div>
       `;
 
-      const resendResponse = await fetch("https://api.resend.com/emails", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${resendApiKey}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          from: "Linen Ops <onboarding@resend.dev>",
-          to: [doctor.email],
+      const emailText =
+        `Hi ${doctor.name ?? ""},\n\n` +
+        `Your lab coat request (${ticket.display_id}) has been issued.\n\n` +
+        `When you're ready to return it, show this link to linen staff:\n` +
+        `${returnUrl}\n`;
+
+      // Port 465 (implicit TLS). Supabase edge functions block outbound 25 and 587.
+      const transporter = nodemailer.createTransport({
+        host: "smtp.gmail.com",
+        port: 465,
+        secure: true,
+        auth: { user: gmailUser, pass: gmailPassword },
+      });
+
+      try {
+        await transporter.sendMail({
+          from: `"Linen Ops" <${gmailUser}>`,
+          to: doctor.email,
           subject: `Your lab coat is ready — ${ticket.display_id}`,
+          text: emailText,
           html: emailHtml,
           attachments: [
             {
               filename: "return-qr-code.png",
               content: qrBase64,
-              content_id: "return-qr-code",
+              encoding: "base64",
+              cid: "return-qr-code",
             },
           ],
-        }),
-      });
-
-      if (!resendResponse.ok) {
-        const errBody = await resendResponse.text();
-        console.error("Resend API error:", resendResponse.status, errBody);
+        });
+      } catch (sendError) {
+        console.error("SMTP send failed:", sendError);
         return Response.json(
           { error: "Failed to send email" },
           { status: 502 },
@@ -155,14 +178,3 @@ export default {
     }
   }),
 };
-
-/* To invoke locally:
-
-  1. Run `supabase start` (see: https://supabase.com/docs/reference/cli/supabase-start)
-  2. Make an HTTP request:
-
-  curl -i --location --request POST 'http://127.0.0.1:54321/functions/v1/send-return-email' \
-    --header 'apiKey: YOUR_SECRET_KEY' \
-    --data '{"ticket_id":"some-ticket-uuid"}'
-
-*/
